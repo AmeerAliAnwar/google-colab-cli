@@ -75,7 +75,7 @@ def callback(
             ),
             case_sensitive=False,
         ),
-    ] = AuthProvider.OAUTH2,
+    ] = AuthProvider.ADC,
 ):
     """
     Colab CLI global configuration.

@@ -7,7 +7,7 @@ A command-line interface for Google Colab. Create sessions, run code, manage fil
 ## Install
 
 ```bash
-uv tool install colab
+uv tool install git+https://github.com/googlecolab/google-colab-cli
 ```
 
 ## Quick start
