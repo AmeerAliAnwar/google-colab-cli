@@ -15,6 +15,7 @@
 import enum
 import json
 import logging
+from importlib import resources
 import os
 import warnings
 from typing import Optional
@@ -44,6 +45,7 @@ PUBLIC_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/colaboratory",
     "https://www.googleapis.com/auth/drive.file",
 ]
@@ -61,9 +63,18 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
     if os.path.exists(config_path):
         with open(config_path, "r") as f:
             client_config = json.load(f)
+    else:
+        # Last resort: try inlined config
+        try:
+            config_resource = resources.files("colab_cli").joinpath("oauth_config.json")
+            if config_resource.is_file():
+                client_config = json.loads(config_resource.read_text())
+        except Exception as e:
+            logger.debug(f"Failed to load inlined config: {e}")
+
     if not client_config:
         raise FileNotFoundError(
-            f"Client OAuth config not found at {config_path}. "
+            f"Client OAuth config not found at {config_path} and no inlined config available. "
             "Please provide a valid path via -c/--client-oauth-config."
         )
 
@@ -138,6 +149,7 @@ def _get_adc_credentials() -> Credentials:
             category=UserWarning,
         )
         creds, _ = google.auth.default(scopes=list(PUBLIC_SCOPES))
+
 
     if not creds.valid:
         from google.auth import compute_engine
