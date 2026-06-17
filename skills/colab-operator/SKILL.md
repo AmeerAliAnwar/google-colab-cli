@@ -1,6 +1,16 @@
+---
+name: colab-operator
+description: Operate Google Colab environments via the `colab` CLI. Use when asked to create or manage GPU/TPU sessions, run Python/shell on a remote Colab VM, sync files, automate environment setup (packages, auth, Drive), or export session history.
+---
+
 # Skill: Colab Session Operator
 
 Operate Google Colab environments via the `colab` CLI: provision GPU/TPU sessions, run Python/shell on the VM, sync files, and capture work as notebooks.
+
+## Installation
+
+If the user does not already have the `colab` tool installed, it can be acquired
+by running `uv tool install google-colab-cli` or `pip install google-colab-cli`.
 
 ## When to activate
 - Creating or managing TPU/GPU sessions.
