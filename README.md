@@ -7,7 +7,7 @@ Designed to support seamless developer productivity, headless automation, and AI
 [Demo](https://github.com/user-attachments/assets/656226a9-af13-4fdb-8eda-d7de747336a2)
 
 > [!NOTE]
-> **Platform support:** the Colab CLI currently supports **Linux and macOS** only. Windows is not supported at this time.
+> **Platform support:** the Colab CLI supports **Linux, macOS, and Windows**. Native Windows terminal support included — no WSL required.
 
 > [!TIP]
 > Looking for in-notebook, interactive agent-assisted coding instead of a terminal workflow? See the [Colab MCP Server](https://github.com/googlecolab/colab-mcp).
@@ -36,6 +36,9 @@ uv tool install google-colab-cli
 # Using pip
 pip install google-colab-cli
 ```
+
+> [!TIP]
+> **Windows users:** If you encounter issues with `uv tool install` opening GUI windows, use `pip install` instead or create a wrapper batch file. See [Windows Quick Start](QUICK_START_WINDOWS.md) for details.
 
 ---
 

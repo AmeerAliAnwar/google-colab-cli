@@ -17,11 +17,21 @@ import logging
 import os
 import signal
 import sys
-import termios
 import threading
 import time
-import tty
 from urllib.parse import urlparse
+
+# Windows compatibility: termios/tty are Unix-only
+try:
+    import termios
+    import tty
+    HAS_TERMIOS = True
+except ImportError:
+    HAS_TERMIOS = False
+    # Windows-specific imports
+    import msvcrt
+    import ctypes
+    from ctypes import wintypes
 
 import websocket
 
@@ -40,6 +50,66 @@ _last_error = None
 # wrapped in tmux + bash; bumping it just delays exit, lowering it risks
 # truncating tail output.
 PIPED_EOF_GRACE_SECONDS = 0.5
+
+
+# Windows console mode constants
+if not HAS_TERMIOS:
+    ENABLE_ECHO_INPUT = 0x0004
+    ENABLE_LINE_INPUT = 0x0002
+    ENABLE_PROCESSED_INPUT = 0x0001
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+
+
+class WindowsConsoleMode:
+    """Context manager for Windows console raw mode."""
+    
+    def __init__(self):
+        if HAS_TERMIOS:
+            return
+        
+        self.stdin_handle = ctypes.windll.kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        self.stdout_handle = ctypes.windll.kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        self.old_stdin_mode = wintypes.DWORD()
+        self.old_stdout_mode = wintypes.DWORD()
+        
+    def __enter__(self):
+        if HAS_TERMIOS:
+            return self
+            
+        # Get current modes
+        ctypes.windll.kernel32.GetConsoleMode(self.stdin_handle, ctypes.byref(self.old_stdin_mode))
+        ctypes.windll.kernel32.GetConsoleMode(self.stdout_handle, ctypes.byref(self.old_stdout_mode))
+        
+        # Set raw mode for stdin (disable line input and echo)
+        new_stdin_mode = self.old_stdin_mode.value & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)
+        ctypes.windll.kernel32.SetConsoleMode(self.stdin_handle, new_stdin_mode)
+        
+        # Enable ANSI/VT processing for stdout
+        new_stdout_mode = self.old_stdout_mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        ctypes.windll.kernel32.SetConsoleMode(self.stdout_handle, new_stdout_mode)
+        
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if HAS_TERMIOS:
+            return
+            
+        # Restore original modes
+        ctypes.windll.kernel32.SetConsoleMode(self.stdin_handle, self.old_stdin_mode)
+        ctypes.windll.kernel32.SetConsoleMode(self.stdout_handle, self.old_stdout_mode)
+
+
+def read_char_windows():
+    """Read a single character on Windows using msvcrt."""
+    if msvcrt.kbhit():
+        char = msvcrt.getwch()
+        # Handle special keys (arrows, function keys, etc.)
+        if char in ('\x00', '\xe0'):
+            # Extended key, read the second byte
+            msvcrt.getwch()  # Consume but ignore for now
+            return None
+        return char
+    return None
 
 
 def on_message(ws, message):
@@ -89,19 +159,14 @@ def on_open(ws):
     # Setup the background thread to read from stdin
     def read_stdin():
         is_tty = sys.stdin.isatty()
-        while _is_running:
-            try:
-                # Read a single character (or escape sequence byte)
-                char = sys.stdin.read(1)
-                if not char:
-                    if not is_tty:
-                        # Piped input has reached EOF. The remote /colab/tty
-                        # endpoint wraps bash in tmux which intercepts \x04
-                        # (Ctrl-D) as a literal character, so it never exits.
-                        # Instead send "exit\n" so bash voluntarily terminates,
-                        # wait a short grace period for the shell's goodbye
-                        # output to drain back to us, then close the websocket
-                        # ourselves to guarantee the client unblocks.
+        
+        if not is_tty:
+            # Non-TTY mode (piped input)
+            while _is_running:
+                try:
+                    char = sys.stdin.read(1)
+                    if not char:
+                        # EOF reached
                         try:
                             ws.send(json.dumps({"data": "exit\n"}))
                         except Exception:
@@ -111,10 +176,36 @@ def on_open(ws):
                             ws.close()
                         except Exception:
                             pass
+                        break
+                    ws.send(json.dumps({"data": char}))
+                except Exception:
                     break
-                ws.send(json.dumps({"data": char}))
-            except Exception:
-                break
+        elif not HAS_TERMIOS:
+            # Windows TTY mode - use msvcrt for character-by-character input
+            while _is_running:
+                try:
+                    if msvcrt.kbhit():
+                        char = msvcrt.getwch()
+                        # Handle special keys
+                        if char in ('\x00', '\xe0'):
+                            # Extended key - read second byte and ignore
+                            msvcrt.getwch()
+                            continue
+                        ws.send(json.dumps({"data": char}))
+                    else:
+                        time.sleep(0.01)  # Small delay to prevent CPU spinning
+                except Exception:
+                    break
+        else:
+            # Unix TTY mode - read character by character
+            while _is_running:
+                try:
+                    char = sys.stdin.read(1)
+                    if not char:
+                        break
+                    ws.send(json.dumps({"data": char}))
+                except Exception:
+                    break
 
     thread = threading.Thread(target=read_stdin, daemon=True)
     thread.start()
@@ -133,8 +224,15 @@ def connect_console(session: SessionState):
     ws_url = f"{ws_scheme}://{parsed.netloc}/colab/tty?colab-runtime-proxy-token={session.token}"
 
     is_tty = sys.stdin.isatty()
-    fd = sys.stdin.fileno() if is_tty else None
-    old_settings = termios.tcgetattr(fd) if is_tty else None
+    
+    # Platform-specific terminal setup
+    if HAS_TERMIOS and is_tty:
+        # Unix: use termios
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+    else:
+        fd = None
+        old_settings = None
 
     ws = websocket.WebSocketApp(
         url=ws_url,
@@ -149,10 +247,18 @@ def connect_console(session: SessionState):
         if _is_running:
             send_terminal_size(ws)
 
+    # Context manager for Windows console mode
+    windows_console = None if HAS_TERMIOS else WindowsConsoleMode()
+
     try:
-        if is_tty:
+        if HAS_TERMIOS and is_tty:
+            # Unix: set raw mode
             tty.setraw(fd, termios.TCSANOW)
-            signal.signal(signal.SIGWINCH, handle_sigwinch)
+            if hasattr(signal, 'SIGWINCH'):
+                signal.signal(signal.SIGWINCH, handle_sigwinch)
+        elif not HAS_TERMIOS and is_tty:
+            # Windows: enter raw console mode
+            windows_console.__enter__()
 
         # This is a blocking call until the connection is closed
         ws.run_forever()
@@ -161,12 +267,14 @@ def connect_console(session: SessionState):
             # Re-raise or wrap terminal errors
             err_msg = str(_last_error)
             if "404" in err_msg or "401" in err_msg:
-                # We raise a standard exception that the caller can recognize
                 raise RuntimeError(f"Connection failed: {err_msg}")
     finally:
-        if is_tty:
-            # Always ensure the terminal is restored to its original state
+        if HAS_TERMIOS and is_tty:
+            # Unix: restore terminal
             termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-            # Restore the default signal handler for resize
-            signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+            if hasattr(signal, 'SIGWINCH'):
+                signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+        elif not HAS_TERMIOS and is_tty and windows_console:
+            # Windows: restore console mode
+            windows_console.__exit__(None, None, None)
         print("\r\nConnection closed.")
